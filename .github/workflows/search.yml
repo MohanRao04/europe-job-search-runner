@@ -41,5 +41,5 @@ jobs:
           if [ -n "$SMTP_PASSWORD" ] || python -c 'import json,sys;sys.exit(0 if json.load(open("state/settings.json", encoding="utf-8-sig")).get("routes") else 1)'; then
             pip install -q fastembed || echo 'Using the offline ranking fallback.'
           fi
-          python -m unittest -q
+          PERSIST_GIT=0 python -m unittest -q
           python agent.py > "$RUNNER_TEMP/search.log" 2>&1 || { echo 'Private search failed. Check the last durable checkpoint and retry.'; exit 1; }

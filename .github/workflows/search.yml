@@ -1,0 +1,41 @@
+name: Job search
+on:
+  schedule:
+    - cron: '17 13 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: applicant-search
+  cancel-in-progress: false
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install --disable-pip-version-check -q -r requirements.txt
+      - name: Load private workspace
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.STATE_REPOSITORY }}
+          ssh-key: ${{ secrets.STATE_DEPLOY_KEY }}
+          ref: main
+          path: state
+      - name: Search and save private report
+        env:
+          STATE_DIR: state
+          PERSIST_GIT: '1'
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          git -C state config user.name search-agent
+          git -C state config user.email search-agent@users.noreply.github.com
+          if python -c 'import json,sys;sys.exit(0 if json.load(open("state/settings.json", encoding="utf-8-sig")).get("application_ready") else 1)'; then
+            python -m playwright install chromium --with-deps >/dev/null
+          fi
+          python agent.py > "$RUNNER_TEMP/search.log" 2>&1 || { echo 'Private search failed. Check the last durable checkpoint and retry.'; exit 1; }

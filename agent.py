@@ -16,6 +16,8 @@ from email.message import EmailMessage
 from pathlib import Path
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+from sponsors import UK, REGISTER, licensed, match
+from ranking import rank
 
 ROOT = Path(os.environ.get("STATE_DIR", "../private-state")).resolve()
 BOARDS = {"monzo": "Monzo", "adyen": "Adyen", "deliveroo": "Deliveroo",
@@ -79,6 +81,13 @@ def portal():
     return [dict(id="arbeitnow/"+r["slug"],title=r["title"],company=r["company_name"],
                  location=r["location"],description=plain(r["description"]),url=r["url"],refresh="") for r in rows]
 
+def ashby(board,company):
+    rows=fetch("https://api.ashbyhq.com/posting-api/job-board/"+board)["jobs"]
+    return [dict(id="ashby/"+board+"/"+r["jobUrl"].rstrip("/").split("/")[-1],
+                 title=r["title"],company=company,location=r.get("location") or "",
+                 description=plain(r.get("descriptionPlain")),url=r["jobUrl"],refresh="")
+            for r in rows if r.get("isListed",True)]
+
 def database():
     db = sqlite3.connect(ROOT / "history.sqlite")
     db.row_factory = sqlite3.Row
@@ -88,6 +97,7 @@ def database():
     CREATE TABLE IF NOT EXISTS events(ts TEXT, kind TEXT, ref TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS applications(id TEXT PRIMARY KEY, identity TEXT UNIQUE, status TEXT, ts TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS reports(day TEXT, span INTEGER, sent INTEGER DEFAULT 0, PRIMARY KEY(day,span));
+    CREATE TABLE IF NOT EXISTS sponsor_checks(id TEXT PRIMARY KEY, checked TEXT, entity TEXT, source TEXT);
     """)
     return db
 
@@ -119,7 +129,7 @@ def package(job, lines, cfg):
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     wanted = skills(job["description"])
     evidence = [line for line in lines if len(line)>65 and skills(line)&wanted and "[" not in line]
-    evidence.sort(key=lambda line: len(skills(line)&wanted), reverse=True)
+    evidence=rank(job["title"]+" "+job["description"],evidence)
     path = ROOT / "applications" / hashlib.sha256(job["id"].encode()).hexdigest()[:20]
     path.mkdir(parents=True, exist_ok=True)
     styles = getSampleStyleSheet()
@@ -136,7 +146,15 @@ def package(job, lines, cfg):
 
 def scan(db, lines, cfg):
     cv = "\n".join(lines)
-    for source, loader in [(f"gh/{b}",lambda b=b: greenhouse(b)) for b in BOARDS]+[("arbeitnow",portal)]:
+    try:
+        names=licensed()
+    except Exception as exc:
+        names={}
+        event(db,"source failure","UK sponsor register",type(exc).__name__)
+    sources=[(f"gh/{b}",lambda b=b: greenhouse(b)) for b in BOARDS]
+    sources.extend((f"ashby/{b}",lambda b=b,c=c: ashby(b,c)) for b,c in
+                   [("deepl","DeepL"),("pleo","Pleo"),("n8n","n8n"),("personio","Personio")])
+    for source, loader in sources+[("arbeitnow",portal)]:
         try:
             all_jobs = loader()
         except Exception as exc:
@@ -144,12 +162,17 @@ def scan(db, lines, cfg):
             db.commit()
             continue
         stamp = now()
-        if source.startswith("gh/"):
+        if source.startswith(("gh/","ashby/")):
             db.execute("UPDATE jobs SET active=0 WHERE id LIKE ?",(source+"/%",))
         for j in all_jobs:
             if not ROLE.search(j["title"]) or not EUROPE.search(j["location"]):
                 continue
             reason, matched, gaps, quote = assess(j,cv)
+            if UK.search(j["location"]):
+                entity=match(j["company"],names,cfg.get("legal_names",{}))
+                db.execute("INSERT OR REPLACE INTO sponsor_checks VALUES(?,?,?,?)",(j["id"],stamp,entity,REGISTER))
+                if reason=="sponsorship evidence found" and not entity:
+                    reason="UK sponsor entity unconfirmed"
             values = (j["id"],j["company"],j["title"],j["location"],j["url"],reason,
                       json.dumps(matched),json.dumps(gaps),quote,stamp,stamp,1)
             db.execute("""INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
@@ -271,6 +294,9 @@ def report(db,day,span,cfg):
         body.extend(["",f"{r['title']} | {r['company']} | {r['location']}",r["reason"]+" | "+", ".join(json.loads(r["matched"])),r["url"]])
         if r["evidence"]:
             body.append(r["evidence"])
+        reg=db.execute("SELECT * FROM sponsor_checks WHERE id=?",(r["id"],)).fetchone()
+        if reg:
+            body.append("UK register: "+(reg["entity"] or "Legal entity unconfirmed")+" | "+reg["source"])
     if span==7:
         gaps=Counter(s for r in rows if not SENIOR.search(r["title"]) for s in json.loads(r["gaps"]))
         body.extend(["","Skills mentioned in target listings but absent from the CV (mentions can include optional skills):",*[f"{s}: {n}" for s,n in gaps.most_common(6)]])

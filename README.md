@@ -16,6 +16,8 @@ Set `report_to`, `smtp_host` and `smtp_user` in private settings. Set `SMTP_PASS
 
 ## Application coverage
 
+To track replies to applications emailed by this worker, configure the private `imap_host` setting. The reader searches for replies referencing its own application message IDs and recorded employer domains. It recognizes explicit interview invitations, rejections and offers. Ambiguous replies, new email threads and external portal updates need individual reconciliation.
+
 The worker distinguishes signs of role-level sponsorship from confirmed permission to apply from overseas. It checks the UK sponsor register for UK roles. A register entry alone does not establish individual visa eligibility. European checks currently use job-specific employer evidence. A clean CV is required before sending. Employer-board postings are fetched again before dispatch.
 
 Email dispatch requires an explicit CV-by-email invitation on the employer's live posting, a matching employer domain and an authorized sender. Browser dispatch requires a supported employer form. Configure `routes` by board (for example `gh/example`) with `form_origin` (exact hostname), `employer_automation_policy` (reviewed evidence) and `valid_until` (ISO date). Review each site's policy and form before adding a browser route. The worker leaves unconfirmed openings in the report. It cannot handle every country, role, language, portal or form.

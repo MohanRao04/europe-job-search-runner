@@ -13,6 +13,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import make_msgid
 from pathlib import Path
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -101,6 +102,7 @@ def database():
     CREATE TABLE IF NOT EXISTS applications(id TEXT PRIMARY KEY, identity TEXT UNIQUE, status TEXT, ts TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS reports(day TEXT, span INTEGER, sent INTEGER DEFAULT 0, PRIMARY KEY(day,span));
     CREATE TABLE IF NOT EXISTS sponsor_checks(id TEXT PRIMARY KEY, checked TEXT, entity TEXT, source TEXT);
+    CREATE TABLE IF NOT EXISTS mail_threads(id TEXT PRIMARY KEY, message_id TEXT, domain TEXT);
     """)
     return db
 
@@ -239,6 +241,7 @@ def apply_if_supported(db, job, lines, cfg):
     browser = None
     if email_route:
         msg["To"] = address[1]
+        msg["Message-ID"] = make_msgid(domain=cfg["applicant_email"].split("@")[-1])
     else:
         from forms import prepare
         try:
@@ -253,6 +256,8 @@ def apply_if_supported(db, job, lines, cfg):
             browser.close()
         return
     event(db,"attempted",job["id"])
+    if email_route:
+        db.execute("INSERT INTO mail_threads VALUES(?,?,?)",(job["id"],str(msg["Message-ID"]),domain))
     checkpoint(db)  # Must be durable before a non-idempotent send.
     try:
         if browser:
@@ -303,6 +308,11 @@ def report(db,day,span,cfg):
             "", "Current decisions in this period:",*[f"{k}: {v}" for k,v in Counter(r["reason"] for r in rows).most_common()]]
     if not cfg.get("application_ready"):
         body.append("Applications paused: complete the identity and contact fields in the CV.")
+    if not os.getenv("SMTP_PASSWORD"):
+        body.append("Email delivery is awaiting the sender credential. Reports are available in this private folder.")
+    if counts.get("source failure"):
+        for ref,detail in db.execute("SELECT DISTINCT ref,detail FROM events WHERE kind='source failure' AND ts>=? AND ts<?",period):
+            body.append(f"Source missed during at least one scan: {ref} ({detail}).")
     for r in sorted(rows,key=lambda r:(r["reason"]!="sponsorship evidence found",-len(json.loads(r["matched"]))))[:15]:
         body.extend(["",f"{r['title']} | {r['company']} | {r['location']}",r["reason"]+" | "+", ".join(json.loads(r["matched"])),r["url"]])
         if r["evidence"]:
@@ -337,6 +347,12 @@ def main():
         checkpoint(db)
         return
     scan(db,read_cv(),cfg)
+    if os.getenv("SMTP_PASSWORD") and cfg.get("imap_host"):
+        from replies import collect
+        try:
+            collect(db,cfg,os.environ["SMTP_PASSWORD"],event)
+        except Exception as exc:
+            event(db,"reply check failed","mail",type(exc).__name__)
     day=datetime.now(ZoneInfo("Asia/Kolkata")).date()
     report(db,day.isoformat(),1,cfg)
     latest_week=db.execute("SELECT max(day) FROM reports WHERE span=7").fetchone()[0]

@@ -23,6 +23,9 @@ ROOT = Path(os.environ.get("STATE_DIR", "../private-state")).resolve()
 BOARDS = {"monzo": "Monzo", "adyen": "Adyen", "deliveroo": "Deliveroo",
           "canonical": "Canonical", "elastic": "Elastic", "datadog": "Datadog",
           "cloudflare": "Cloudflare", "mongodb": "MongoDB"}
+MAIL_DOMAINS={"monzo":"monzo.com","adyen":"adyen.com","deliveroo":"deliveroo.co.uk",
+              "elastic":"elastic.co","datadog":"datadoghq.com","cloudflare":"cloudflare.com",
+              "mongodb":"mongodb.com"}
 ROLE = re.compile(r"\b(data engineer(?:ing)?|analytics engineer(?:ing)?|(?:bi|business intelligence|sql|etl|power bi|data warehouse) (?:developer|engineer|analyst)|data platform engineer|analytical engineer)\b", re.I)
 EUROPE = re.compile(r"\b(united kingdom|uk|london|manchester|cardiff|edinburgh|bristol|dublin|ireland|germany|berlin|munich|hamburg|netherlands|amsterdam|rotterdam|france|paris|spain|madrid|barcelona|portugal|lisbon|poland|warsaw|krak[oó]w|sweden|stockholm|denmark|copenhagen|belgium|brussels|finland|helsinki|austria|vienna|italy|milan|czechia|prague|switzerland|zurich|norway|oslo|estonia|tallinn|luxembourg|romania|greece|hungary|slovakia|slovenia|croatia|lithuania|latvia|bulgaria|europe)\b", re.I)
 SENIOR = re.compile(r"\b(senior|sr\.?|staff|principal|lead|head|manager|director|architect)\b", re.I)
@@ -128,14 +131,21 @@ def package(job, lines, cfg):
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     wanted = skills(job["description"])
-    evidence = [line for line in lines if len(line)>65 and skills(line)&wanted and "[" not in line]
+    experience = lines[lines.index("EXPERIENCE")+1:lines.index("SKILLS")] if "EXPERIENCE" in lines and "SKILLS" in lines else lines[1:]
+    evidence = [line for line in experience if len(line)>65 and skills(line)&wanted and "[" not in line and line.endswith(".")]
     evidence=rank(job["title"]+" "+job["description"],evidence)
     path = ROOT / "applications" / hashlib.sha256(job["id"].encode()).hexdigest()[:20]
     path.mkdir(parents=True, exist_ok=True)
     styles = getSampleStyleSheet()
     flow = []
-    for line in [lines[0],"Relevant experience",*evidence[:2],"Curriculum vitae",*lines[1:]]:
-        flow.extend([Paragraph(escape(line),styles["Heading2" if line in ("Relevant experience","Curriculum vitae") else "BodyText"]),Spacer(1,4)])
+    ordered=list(lines)
+    if "SUMMARY" in ordered and evidence:
+        start=ordered.index("SUMMARY")
+        if start+1<len(ordered):
+            ordered[start:start+2]=["Selected experience",*evidence[:2]]
+    for i,line in enumerate(ordered):
+        style="Title" if i==0 else "Heading2" if line.isupper() or line=="Selected experience" else "BodyText"
+        flow.extend([Paragraph(escape(line),styles[style]),Spacer(1,4)])
     pdf = path/"Resume.pdf"
     SimpleDocTemplate(str(pdf),pagesize=A4).build(flow)
     letter = (f"Dear {job['company']} hiring team,\n\nI am applying for the {job['title']} position. "
@@ -153,7 +163,7 @@ def scan(db, lines, cfg):
         event(db,"source failure","UK sponsor register",type(exc).__name__)
     sources=[(f"gh/{b}",lambda b=b: greenhouse(b)) for b in BOARDS]
     sources.extend((f"ashby/{b}",lambda b=b,c=c: ashby(b,c)) for b,c in
-                   [("deepl","DeepL"),("pleo","Pleo"),("n8n","n8n"),("personio","Personio")])
+                   [("deepl","DeepL"),("pleo","Pleo"),("n8n","n8n")])
     for source, loader in sources+[("arbeitnow",portal)]:
         try:
             all_jobs = loader()
@@ -189,9 +199,8 @@ def scan(db, lines, cfg):
 def apply_if_supported(db, job, lines, cfg):
     if not cfg.get("application_ready") or any(re.search(r"\[[^\]]+\]|\bTBD\b",line,re.I) for line in lines):
         return
-    route = cfg.get("routes",{}).get(job["id"].rsplit("/",1)[0])
-    if not route or not route.get("employer_automation_policy"):
-        return
+    board=job["id"].rsplit("/",1)[0]
+    route=cfg.get("routes",{}).get(board,{})
     # Applicant-facing email route only when the official posting explicitly invites this method.
     if not cfg.get("name") or not cfg.get("applicant_email"):
         return
@@ -207,16 +216,18 @@ def apply_if_supported(db, job, lines, cfg):
     if fresh["title"] != job["title"] or fresh["location"] != job["location"] or assess(fresh,"\n".join(lines))[0] != "sponsorship evidence found":
         return
     # Require an unambiguous invitation for overseas applicants and the site's plain CV-by-email instruction.
-    invite = re.search(r"(?:applicants from india|candidates from (?:india|any country)|applicants worldwide) (?:are )?(?:welcome|eligible|accepted)",desc,re.I)
+    invite = re.search(r"(?:applicants from india|candidates from (?:india|any country)|applicants worldwide) (?:are )?(?:welcome|eligible|accepted)|(?:welcome|accept|consider) (?:applications|applicants|candidates) from (?:india|anywhere in the world|around the world|all countries)",desc,re.I)
     address = re.search(r"(?:apply by emailing|send (?:your |a )?(?:cv|resume)(?: and (?:a |your )?cover letter)? to)\s+([\w.+-]+@[\w.-]+\.[a-z]{2,})",desc,re.I)
     if not invite:
         return
-    if not route.get("sponsor_evidence_url") or route.get("valid_until","") < now()[:10]:
+    if re.search(r"(?:no|do not accept|prohibit).{0,25}(?:automated applications|AI.generated applications)|apply (?:only|exclusively) (?:online|through)",desc,re.I):
         return
     if not role_requirements_met(desc,lines,cfg):
         return
-    email_route = address and address[1].lower().split("@")[-1] == route.get("mail_domain") and os.getenv("SMTP_PASSWORD")
-    if not email_route and not route.get("form_origin"):
+    domain=MAIL_DOMAINS.get(board.removeprefix("gh/"))
+    email_route = address and address[1].lower().split("@")[-1] == domain and os.getenv("SMTP_PASSWORD")
+    if not email_route and not (route.get("form_origin") and route.get("employer_automation_policy") and route.get("valid_until","") >= now()[:10]):
+        event(db,"application channel unavailable",job["id"])
         return
     identity = "|".join(" ".join(fresh[k].lower().split()) for k in ("company","title","location"))
     pdf,letter = package(fresh,lines,cfg)
@@ -285,7 +296,9 @@ def report(db,day,span,cfg):
     new = db.execute("SELECT count(*) FROM jobs WHERE first_seen>=? AND first_seen<?",period).fetchone()[0]
     rows = db.execute("SELECT * FROM jobs WHERE active=1 AND seen>=? AND seen<? ORDER BY seen DESC",period).fetchall()
     title = f"{'Weekly' if span==7 else 'Daily'} job search | {day} IST"
-    body = [title,"",f"New relevant vacancies: {new}",f"Distinct jobs analyzed: {db.execute('SELECT count(DISTINCT ref) FROM events WHERE kind=\'analyzed\' AND ts>=? AND ts<?',period).fetchone()[0]}",
+    screened=db.execute("SELECT coalesce(sum(cast(detail as integer)),0) FROM events WHERE kind='source scanned' AND ts>=? AND ts<?",period).fetchone()[0]
+    analyzed=db.execute("SELECT count(DISTINCT ref) FROM events WHERE kind='analyzed' AND ts>=? AND ts<?",period).fetchone()[0]
+    body = [title,"",f"Listing checks (includes repeat scans): {screened}",f"New relevant vacancies: {new}",f"Distinct jobs analyzed: {analyzed}",
             *[f"{key.capitalize()}: {counts.get(key,0)}" for key in ("attempted","submitted","delivery uncertain","interview","rejection","offer","source failure")],
             "", "Current decisions in this period:",*[f"{k}: {v}" for k,v in Counter(r["reason"] for r in rows).most_common()]]
     if not cfg.get("application_ready"):
@@ -298,6 +311,8 @@ def report(db,day,span,cfg):
         if reg:
             body.append("UK register: "+(reg["entity"] or "Legal entity unconfirmed")+" | "+reg["source"])
     if span==7:
+        attempts,submitted=counts.get("attempted",0),counts.get("submitted",0)
+        body.append(f"Submission success: {submitted}/{attempts} attempts." if attempts else "Submission success: no attempts during the period.")
         gaps=Counter(s for r in rows if not SENIOR.search(r["title"]) for s in json.loads(r["gaps"]))
         body.extend(["","Skills mentioned in target listings but absent from the CV (mentions can include optional skills):",*[f"{s}: {n}" for s,n in gaps.most_common(6)]])
         if gaps:
@@ -324,7 +339,8 @@ def main():
     scan(db,read_cv(),cfg)
     day=datetime.now(ZoneInfo("Asia/Kolkata")).date()
     report(db,day.isoformat(),1,cfg)
-    if day.weekday()==6 or not db.execute("SELECT 1 FROM reports WHERE span=7").fetchone():
+    latest_week=db.execute("SELECT max(day) FROM reports WHERE span=7").fetchone()[0]
+    if day.weekday()==6 or not latest_week or latest_week==day.isoformat() or latest_week<=(day-timedelta(days=7)).isoformat():
         report(db,day.isoformat(),7,cfg)
     checkpoint(db)
     if cfg.get("report_to") and cfg.get("smtp_user") and os.getenv("SMTP_PASSWORD"):

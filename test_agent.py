@@ -38,5 +38,26 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(match("Example",names,{}),"Example Limited")
         self.assertIsNone(match("Example Co",names,{}))
 
+    def test_mail_receipt_and_uncertain_delivery_are_never_replayed(self):
+        for failure in (None,TimeoutError()):
+            with self.subTest(failure=bool(failure)),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)
+                pdf=root/"resume.pdf"
+                pdf.write_bytes(b"test attachment")
+                job=dict(self.job,id="gh/adyen/8",company="Adyen",location="Amsterdam")
+                desc=job["description"]+" Applicants from India are welcome. Send your CV to jobs@adyen.com."
+                listing=dict(content=desc,title=job["title"],location={"name":job["location"]})
+                cfg=dict(application_ready=True,name="Example",applicant_email="candidate@example.org")
+                with patch.object(agent,"ROOT",root),patch.object(agent,"fetch",return_value=listing),patch.object(agent,"package",return_value=(pdf,"Example letter")),patch.dict(agent.os.environ,{"SMTP_PASSWORD":"fixture","PERSIST_GIT":"0"}),patch.object(agent,"deliver",side_effect=failure) as send:
+                    db=agent.database()
+                    try:
+                        for _ in range(2):
+                            agent.apply_if_supported(db,job,["SQL Python"],cfg)
+                        self.assertEqual(send.call_count,1)
+                        row=db.execute("SELECT status FROM applications").fetchone()
+                        self.assertEqual(row[0],"delivery uncertain" if failure else "submitted")
+                    finally:
+                        db.close()
+
 if __name__=="__main__":
     unittest.main()
